@@ -40,7 +40,6 @@ with a discount using [this referral link](https://iproyal.com/?r=795836)! 🚀
 
 # TODO
 
-- UDP Support in SOCKS5
 - UDP static routing
 
 # Usage
@@ -151,6 +150,19 @@ BindAddress = 127.0.0.1:25345
 # proxy authentication.
 #Username = ...
 # Avoid using spaces in the password field
+#Password = ...
+
+# Socks5Tunnel creates a SOCKS5 proxy that chains through an upstream SOCKS5 server
+# accessible via wireguard. This is useful for accessing a SOCKS5 proxy on a peer.
+# Flow:
+# <app on your LAN> --> localhost:1080 --(wireguard)--> 10.0.0.1:1080 --> internet
+[Socks5Tunnel]
+BindAddress = 127.0.0.1:1080
+# Target supports curl-style URLs: host:port, socks5://host:port, socks5://user:pass@host:port
+Target = socks5://10.0.0.1:1080
+
+# Optional local authentication (for clients connecting to wireproxy)
+#Username = ...
 #Password = ...
 ```
 
