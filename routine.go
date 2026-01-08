@@ -8,10 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"golang.org/x/net/icmp"
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
-	"golang.zx2c4.com/wireguard/device"
 	"io"
 	"log"
 	"math/rand"
@@ -23,6 +19,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
+	"golang.zx2c4.com/wireguard/device"
 
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/bufferpool"
@@ -149,15 +150,24 @@ func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
 		authMethods = append(authMethods, socks5.NoAuthAuthenticator{})
 	}
 
+	// Extract bind IP for UDP associate - this ensures UDP listener binds to same interface
+	bindHost, _, err := net.SplitHostPort(config.BindAddress)
+	if err != nil {
+		log.Fatalf("Invalid SOCKS5 bind address %s: %v", config.BindAddress, err)
+	}
+	bindIP := net.ParseIP(bindHost)
+
 	options := []socks5.Option{
 		socks5.WithDial(vt.Tnet.DialContext),
 		socks5.WithResolver(vt),
 		socks5.WithAuthMethods(authMethods),
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
+		socks5.WithBindIP(bindIP),
 	}
 
 	server := socks5.NewServer(options...)
 
+	log.Printf("SOCKS5 server listening on %s (UDP associate enabled)\n", config.BindAddress)
 	if err := server.ListenAndServe("tcp", config.BindAddress); err != nil {
 		log.Fatal(err)
 	}

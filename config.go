@@ -59,6 +59,14 @@ type HTTPConfig struct {
 	Password    string
 }
 
+// Socks5TunnelConfig creates a local SOCKS5 listener that chains through an upstream SOCKS5
+type Socks5TunnelConfig struct {
+	BindAddress string
+	Target      string // socks5://user:pass@host:port
+	Username    string // Local auth (optional)
+	Password    string
+}
+
 type Configuration struct {
 	Device   *DeviceConfig
 	Routines []RoutineSpawner
@@ -175,7 +183,7 @@ func parseCIDRNetIP(section *ini.Section, keyName string) ([]netip.Addr, error) 
 		if len(str) == 0 {
 			continue
 		}
-    
+
 		if addr, err := netip.ParseAddr(str); err == nil {
 			ips = append(ips, addr)
 		} else {
@@ -183,7 +191,7 @@ func parseCIDRNetIP(section *ini.Section, keyName string) ([]netip.Addr, error) 
 			if err != nil {
 				return nil, err
 			}
-      
+
 			addr := prefix.Addr()
 			ips = append(ips, addr)
 		}
@@ -435,6 +443,30 @@ func parseHTTPConfig(section *ini.Section) (RoutineSpawner, error) {
 	return config, nil
 }
 
+func parseSocks5TunnelConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &Socks5TunnelConfig{}
+
+	bindAddress, err := parseString(section, "BindAddress")
+	if err != nil {
+		return nil, err
+	}
+	config.BindAddress = bindAddress
+
+	target, err := parseString(section, "Target")
+	if err != nil {
+		return nil, err
+	}
+	config.Target = target
+
+	username, _ := parseString(section, "Username")
+	config.Username = username
+
+	password, _ := parseString(section, "Password")
+	config.Password = password
+
+	return config, nil
+}
+
 // Takes a function that parses an individual section into a config, and apply it on all
 // specified sections
 func parseRoutinesConfig(routines *[]RoutineSpawner, cfg *ini.File, sectionName string, f func(*ini.Section) (RoutineSpawner, error)) error {
@@ -515,6 +547,11 @@ func ParseConfig(path string) (*Configuration, error) {
 	}
 
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "http", parseHTTPConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "Socks5Tunnel", parseSocks5TunnelConfig)
 	if err != nil {
 		return nil, err
 	}
