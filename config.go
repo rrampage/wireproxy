@@ -38,6 +38,11 @@ type TCPClientTunnelConfig struct {
 	Target      string
 }
 
+type UDPClientTunnelConfig struct {
+	BindAddress *net.UDPAddr
+	Target      string
+}
+
 type STDIOTunnelConfig struct {
 	Target string
 }
@@ -116,6 +121,14 @@ func parseTCPAddr(section *ini.Section, keyName string) (*net.TCPAddr, error) {
 		return nil, err
 	}
 	return net.ResolveTCPAddr("tcp", addrStr)
+}
+
+func parseUDPAddr(section *ini.Section, keyName string) (*net.UDPAddr, error) {
+	addrStr, err := parseString(section, keyName)
+	if err != nil {
+		return nil, err
+	}
+	return net.ResolveUDPAddr("udp", addrStr)
 }
 
 func parseBase64KeyToHex(section *ini.Section, keyName string) (string, error) {
@@ -389,6 +402,23 @@ func parseSTDIOTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
 	return config, nil
 }
 
+func parseUDPClientTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &UDPClientTunnelConfig{}
+	udpAddr, err := parseUDPAddr(section, "BindAddress")
+	if err != nil {
+		return nil, err
+	}
+	config.BindAddress = udpAddr
+
+	target, err := parseString(section, "Target")
+	if err != nil {
+		return nil, err
+	}
+	config.Target = target
+
+	return config, nil
+}
+
 func parseTCPServerTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
 	config := &TCPServerTunnelConfig{}
 
@@ -532,6 +562,11 @@ func ParseConfig(path string) (*Configuration, error) {
 	}
 
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "STDIOTunnel", parseSTDIOTunnelConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPClientTunnel", parseUDPClientTunnelConfig)
 	if err != nil {
 		return nil, err
 	}

@@ -285,6 +285,81 @@ func (conf *STDIOTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 	go STDIOTcpForward(vt, raddr)
 }
 
+// SpawnRoutine spawns a local UDP server which forwards traffic to the specified target via wireguard
+func (conf *UDPClientTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+	raddr, err := parseAddressPort(conf.Target)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	server, err := net.ListenUDP("udp", conf.BindAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("UDPClientTunnel listening on %s -> %s\n", conf.BindAddress, conf.Target)
+
+	// Track client connections for routing responses
+	clients := make(map[string]*net.UDPAddr)
+	var clientsMu sync.RWMutex
+
+	// Resolve target once
+	target, err := vt.resolveToAddrPort(raddr)
+	if err != nil {
+		log.Fatalf("UDPClientTunnel: cannot resolve target %s: %v", conf.Target, err)
+	}
+	udpAddr := UDPAddrFromAddrPort(*target)
+
+	// Create connection to remote via WireGuard
+	remoteConn, err := vt.Tnet.DialUDP(nil, udpAddr)
+	if err != nil {
+		log.Fatalf("UDPClientTunnel: cannot dial target %s: %v", udpAddr, err)
+	}
+
+	// Forward: remote -> local client
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, err := remoteConn.Read(buf)
+			if err != nil {
+				errorLogger.Printf("UDPClientTunnel read from remote: %v\n", err)
+				return
+			}
+
+			// For a simple tunnel with single target, send to last known client
+			clientsMu.RLock()
+			var clientAddr *net.UDPAddr
+			for _, addr := range clients {
+				clientAddr = addr
+				break
+			}
+			clientsMu.RUnlock()
+
+			if clientAddr != nil {
+				server.WriteTo(buf[:n], clientAddr)
+			}
+		}
+	}()
+
+	// Forward: local client -> remote
+	buf := make([]byte, 65535)
+	for {
+		n, clientAddr, err := server.ReadFromUDP(buf)
+		if err != nil {
+			errorLogger.Printf("UDPClientTunnel read from local: %v\n", err)
+			continue
+		}
+
+		// Track client for responses
+		clientsMu.Lock()
+		clients[clientAddr.String()] = clientAddr
+		clientsMu.Unlock()
+
+		// Forward to remote
+		remoteConn.Write(buf[:n])
+	}
+}
+
 // tcpServerForward starts a new connection locally and forward traffic from `conn`
 func tcpServerForward(vt *VirtualTun, raddr *addressPort, conn net.Conn) {
 	target, err := vt.resolveToAddrPort(raddr)

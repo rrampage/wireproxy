@@ -40,7 +40,7 @@ with a discount using [this referral link](https://iproyal.com/?r=795836)! 🚀
 
 # TODO
 
-- UDP static routing
+- UDP static routing (client tunnel implemented but needs more testing)
 
 # Usage
 
@@ -113,6 +113,16 @@ Endpoint = my.ddns.example.com:51820
 [TCPClientTunnel]
 BindAddress = 127.0.0.1:25565
 Target = play.cubecraft.net:25565
+
+# UDPClientTunnel is a tunnel listening on your machine,
+# and it forwards any UDP traffic received to the specified target via wireguard.
+# This is useful for accessing UDP services (e.g. DNS) on a wireguard peer.
+# Flow:
+# <an app on your LAN> --> localhost:5353 --(wireguard)--> 10.0.0.1:53
+# e.g `dig @localhost -p 5353 example.com`
+[UDPClientTunnel]
+BindAddress = 127.0.0.1:5353
+Target = 10.0.0.1:53
 
 # TCPServerTunnel is a tunnel listening on wireguard,
 # and it forwards any TCP traffic received to the specified target via local network.
