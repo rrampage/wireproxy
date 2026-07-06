@@ -44,10 +44,11 @@ type CredentialValidator struct {
 
 // VirtualTun stores a reference to netstack network and DNS configuration
 type VirtualTun struct {
-	Tnet      *netstack.Net
-	Dev       *device.Device
-	SystemDNS bool
-	Conf      *DeviceConfig
+	Tnet          *netstack.Net
+	Dev           *device.Device
+	SystemDNS     bool
+	Conf          *DeviceConfig
+	ResolveConfig *ResolveConfig
 	// PingRecord stores the last time an IP was pinged
 	PingRecord     map[string]uint64
 	PingRecordLock *sync.Mutex
@@ -80,33 +81,48 @@ func (d VirtualTun) ResolveAddrWithContext(ctx context.Context, name string) (*n
 		return nil, err
 	}
 
-	size := len(addrs)
-	if size == 0 {
-		return nil, errors.New("no address found for: " + name)
-	}
+	addrs_v4 := []netip.Addr{}
+	addrs_v6 := []netip.Addr{}
 
-	rand.Shuffle(size, func(i, j int) {
-		addrs[i], addrs[j] = addrs[j], addrs[i]
-	})
-
-	var addr netip.Addr
 	for _, saddr := range addrs {
-		addr, err = netip.ParseAddr(saddr)
+		addr, err := netip.ParseAddr(saddr)
 		if err == nil {
-			break
+			if addr.Is4() {
+				addrs_v4 = append(addrs_v4, addr)
+			} else if addr.Is6() {
+				addrs_v6 = append(addrs_v6, addr)
+			}
 		}
 	}
 
-	if err != nil {
-		return nil, err
+	rand.Shuffle(len(addrs_v4), func(i, j int) {
+		addrs_v4[i], addrs_v4[j] = addrs_v4[j], addrs_v4[i]
+	})
+	rand.Shuffle(len(addrs_v6), func(i, j int) {
+		addrs_v6[i], addrs_v6[j] = addrs_v6[j], addrs_v6[i]
+	})
+
+	addrs_all := []netip.Addr{}
+
+	switch d.ResolveConfig.ResolveStrategy {
+	case "ipv4":
+		addrs_all = append(addrs_v4, addrs_v6...)
+	case "ipv6":
+		addrs_all = append(addrs_v6, addrs_v4...)
 	}
 
-	return &addr, nil
+	if len(addrs_all) == 0 {
+		return nil, errors.New("no address found for: " + name)
+	}
+
+	return &addrs_all[0], nil
 }
 
 // Resolve resolves a hostname and returns an IP.
 // DNS traffic may or may not be routed depending on VirtualTun's setting
 func (d VirtualTun) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	log.Printf("Resolving address for %s\n", name)
+
 	addr, err := d.ResolveAddrWithContext(ctx, name)
 	if err != nil {
 		return nil, nil, err
@@ -184,6 +200,10 @@ func (config *HTTPConfig) SpawnRoutine(vt *VirtualTun) {
 		server.authRequired = true
 	}
 
+	if config.CertFile != "" && config.KeyFile != "" {
+		server.tlsRequired = true
+	}
+
 	if err := server.ListenAndServe("tcp", config.BindAddress); err != nil {
 		log.Fatal(err)
 	}
@@ -199,8 +219,8 @@ func (c CredentialValidator) Valid(username, password string) bool {
 
 // connForward copy data from `from` to `to`
 func connForward(from io.ReadWriteCloser, to io.ReadWriteCloser) {
-	defer from.Close()
-	defer to.Close()
+	defer func() { _ = from.Close() }()
+	defer func() { _ = to.Close() }()
 
 	_, err := io.Copy(to, from)
 	if err != nil {
@@ -216,7 +236,7 @@ func tcpClientForward(vt *VirtualTun, raddr *addressPort, conn net.Conn) {
 		return
 	}
 
-	tcpAddr := TCPAddrFromAddrPort(*target)
+	tcpAddr := net.TCPAddrFromAddrPort(*target)
 
 	sconn, err := vt.Tnet.DialTCP(tcpAddr)
 	if err != nil {
@@ -229,29 +249,22 @@ func tcpClientForward(vt *VirtualTun, raddr *addressPort, conn net.Conn) {
 }
 
 // STDIOTcpForward starts a new connection via wireguard and forward traffic from `conn`
-func STDIOTcpForward(vt *VirtualTun, raddr *addressPort) {
+func STDIOTcpForward(vt *VirtualTun, raddr *addressPort, input *os.File, output *os.File) {
 	target, err := vt.resolveToAddrPort(raddr)
 	if err != nil {
 		errorLogger.Printf("Name resolution error for %s: %s\n", raddr.address, err.Error())
 		return
 	}
 
-	// os.Stdout has previously been remapped to stderr, se we can't use it
-	stdout, err := os.OpenFile("/dev/stdout", os.O_WRONLY, 0)
-	if err != nil {
-		errorLogger.Printf("Failed to open /dev/stdout: %s\n", err.Error())
-		return
-	}
-
-	tcpAddr := TCPAddrFromAddrPort(*target)
+	tcpAddr := net.TCPAddrFromAddrPort(*target)
 	sconn, err := vt.Tnet.DialTCP(tcpAddr)
 	if err != nil {
 		errorLogger.Printf("TCP Client Tunnel to %s (%s): %s\n", target, tcpAddr, err.Error())
 		return
 	}
 
-	go connForward(os.Stdin, sconn)
-	go connForward(sconn, stdout)
+	go connForward(input, sconn)
+	go connForward(sconn, output)
 }
 
 // SpawnRoutine spawns a local TCP server which acts as a proxy to the specified target
@@ -282,82 +295,7 @@ func (conf *STDIOTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 		log.Fatal(err)
 	}
 
-	go STDIOTcpForward(vt, raddr)
-}
-
-// SpawnRoutine spawns a local UDP server which forwards traffic to the specified target via wireguard
-func (conf *UDPClientTunnelConfig) SpawnRoutine(vt *VirtualTun) {
-	raddr, err := parseAddressPort(conf.Target)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	server, err := net.ListenUDP("udp", conf.BindAddress)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("UDPClientTunnel listening on %s -> %s\n", conf.BindAddress, conf.Target)
-
-	// Track client connections for routing responses
-	clients := make(map[string]*net.UDPAddr)
-	var clientsMu sync.RWMutex
-
-	// Resolve target once
-	target, err := vt.resolveToAddrPort(raddr)
-	if err != nil {
-		log.Fatalf("UDPClientTunnel: cannot resolve target %s: %v", conf.Target, err)
-	}
-	udpAddr := UDPAddrFromAddrPort(*target)
-
-	// Create connection to remote via WireGuard
-	remoteConn, err := vt.Tnet.DialUDP(nil, udpAddr)
-	if err != nil {
-		log.Fatalf("UDPClientTunnel: cannot dial target %s: %v", udpAddr, err)
-	}
-
-	// Forward: remote -> local client
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, err := remoteConn.Read(buf)
-			if err != nil {
-				errorLogger.Printf("UDPClientTunnel read from remote: %v\n", err)
-				return
-			}
-
-			// For a simple tunnel with single target, send to last known client
-			clientsMu.RLock()
-			var clientAddr *net.UDPAddr
-			for _, addr := range clients {
-				clientAddr = addr
-				break
-			}
-			clientsMu.RUnlock()
-
-			if clientAddr != nil {
-				server.WriteTo(buf[:n], clientAddr)
-			}
-		}
-	}()
-
-	// Forward: local client -> remote
-	buf := make([]byte, 65535)
-	for {
-		n, clientAddr, err := server.ReadFromUDP(buf)
-		if err != nil {
-			errorLogger.Printf("UDPClientTunnel read from local: %v\n", err)
-			continue
-		}
-
-		// Track client for responses
-		clientsMu.Lock()
-		clients[clientAddr.String()] = clientAddr
-		clientsMu.Unlock()
-
-		// Forward to remote
-		remoteConn.Write(buf[:n])
-	}
+	go STDIOTcpForward(vt, raddr, conf.Input, conf.Output)
 }
 
 // tcpServerForward starts a new connection locally and forward traffic from `conn`
@@ -368,7 +306,7 @@ func tcpServerForward(vt *VirtualTun, raddr *addressPort, conn net.Conn) {
 		return
 	}
 
-	tcpAddr := TCPAddrFromAddrPort(*target)
+	tcpAddr := net.TCPAddrFromAddrPort(*target)
 
 	sconn, err := net.DialTCP("tcp", nil, tcpAddr)
 	if err != nil {
@@ -400,6 +338,22 @@ func (conf *TCPServerTunnelConfig) SpawnRoutine(vt *VirtualTun) {
 			log.Fatal(err)
 		}
 		go tcpServerForward(vt, raddr, conn)
+	}
+}
+
+// SpawnRoutine spawns an SNI proxy server.
+func (config *SNIConfig) SpawnRoutine(vt *VirtualTun) {
+	listener, err := net.Listen("tcp", config.BindAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Fatal(err)
+		}
+		go sniServe(vt.Tnet.Dial, conn)
 	}
 }
 
@@ -535,15 +489,17 @@ func (d VirtualTun) pingIPs() {
 			d.PingRecord[addr.String()] = uint64(time.Now().Unix())
 			d.PingRecordLock.Unlock()
 
-			defer socket.Close()
+			defer func() { _ = socket.Close() }()
 		}()
 	}
 }
 
 func (d VirtualTun) StartPingIPs() {
+	d.PingRecordLock.Lock()
 	for _, addr := range d.Conf.CheckAlive {
 		d.PingRecord[addr.String()] = 0
 	}
+	d.PingRecordLock.Unlock()
 
 	go func() {
 		for {

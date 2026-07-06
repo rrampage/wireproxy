@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-ini/ini"
@@ -33,18 +34,21 @@ type DeviceConfig struct {
 	CheckAliveInterval int
 }
 
+type UDPProxyTunnelConfig struct {
+	BindAddress       string
+	Target            string
+	InactivityTimeout int
+}
+
 type TCPClientTunnelConfig struct {
 	BindAddress *net.TCPAddr
 	Target      string
 }
 
-type UDPClientTunnelConfig struct {
-	BindAddress *net.UDPAddr
-	Target      string
-}
-
 type STDIOTunnelConfig struct {
 	Target string
+	Input  *os.File
+	Output *os.File
 }
 
 type TCPServerTunnelConfig struct {
@@ -58,10 +62,16 @@ type Socks5Config struct {
 	Password    string
 }
 
+type SNIConfig struct {
+	BindAddress string
+}
+
 type HTTPConfig struct {
 	BindAddress string
 	Username    string
 	Password    string
+	CertFile    string
+	KeyFile     string
 }
 
 // Socks5TunnelConfig creates a local SOCKS5 listener that chains through an upstream SOCKS5
@@ -72,9 +82,14 @@ type Socks5TunnelConfig struct {
 	Password    string
 }
 
+type ResolveConfig struct {
+	ResolveStrategy string
+}
+
 type Configuration struct {
 	Device   *DeviceConfig
 	Routines []RoutineSpawner
+	Resolve  *ResolveConfig
 }
 
 func parseString(section *ini.Section, keyName string) (string, error) {
@@ -108,7 +123,7 @@ func parsePort(section *ini.Section, keyName string) (int, error) {
 		return 0, err
 	}
 
-	if !(port >= 0 && port < 65536) {
+	if port < 0 || port >= 65536 {
 		return 0, errors.New("port should be >= 0 and < 65536")
 	}
 
@@ -121,14 +136,6 @@ func parseTCPAddr(section *ini.Section, keyName string) (*net.TCPAddr, error) {
 		return nil, err
 	}
 	return net.ResolveTCPAddr("tcp", addrStr)
-}
-
-func parseUDPAddr(section *ini.Section, keyName string) (*net.UDPAddr, error) {
-	addrStr, err := parseString(section, keyName)
-	if err != nil {
-		return nil, err
-	}
-	return net.ResolveUDPAddr("udp", addrStr)
 }
 
 func parseBase64KeyToHex(section *ini.Section, keyName string) (string, error) {
@@ -398,23 +405,8 @@ func parseSTDIOTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
 		return nil, err
 	}
 	config.Target = targetSection
-
-	return config, nil
-}
-
-func parseUDPClientTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
-	config := &UDPClientTunnelConfig{}
-	udpAddr, err := parseUDPAddr(section, "BindAddress")
-	if err != nil {
-		return nil, err
-	}
-	config.BindAddress = udpAddr
-
-	target, err := parseString(section, "Target")
-	if err != nil {
-		return nil, err
-	}
-	config.Target = target
+	config.Input = os.Stdin
+	config.Output = os.Stdout
 
 	return config, nil
 }
@@ -455,6 +447,18 @@ func parseSocks5Config(section *ini.Section) (RoutineSpawner, error) {
 	return config, nil
 }
 
+func parseSNIConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &SNIConfig{}
+
+	bindAddress, err := parseString(section, "BindAddress")
+	if err != nil {
+		return nil, err
+	}
+	config.BindAddress = bindAddress
+
+	return config, nil
+}
+
 func parseHTTPConfig(section *ini.Section) (RoutineSpawner, error) {
 	config := &HTTPConfig{}
 
@@ -469,6 +473,49 @@ func parseHTTPConfig(section *ini.Section) (RoutineSpawner, error) {
 
 	password, _ := parseString(section, "Password")
 	config.Password = password
+
+	certFile, _ := parseString(section, "CertFile")
+	config.CertFile = certFile
+
+	keyFile, _ := parseString(section, "KeyFile")
+	config.KeyFile = keyFile
+
+	return config, nil
+}
+
+func parseResolveConfig(section *ini.Section) (*ResolveConfig, error) {
+	config := &ResolveConfig{}
+
+	resolveStrategy, _ := parseString(section, "ResolveStrategy")
+	config.ResolveStrategy = resolveStrategy
+
+	return config, nil
+}
+
+func parseUDPProxyTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &UDPProxyTunnelConfig{}
+
+	bindAddress, err := parseString(section, "BindAddress")
+	if err != nil {
+		return nil, err
+	}
+	config.BindAddress = bindAddress
+
+	target, err := parseString(section, "Target")
+	if err != nil {
+		return nil, err
+	}
+	config.Target = target
+
+	inactivityTimeout := 0
+	if sectionKey, err := section.GetKey("InactivityTimeout"); err == nil {
+		timeoutVal, err := sectionKey.Int()
+		if err != nil {
+			return nil, err
+		}
+		inactivityTimeout = timeoutVal
+	}
+	config.InactivityTimeout = inactivityTimeout
 
 	return config, nil
 }
@@ -534,11 +581,22 @@ func ParseConfig(path string) (*Configuration, error) {
 		MTU: 1420,
 	}
 
+	resolve := &ResolveConfig{
+		ResolveStrategy: "auto",
+	}
+
 	root := cfg.Section("")
 	wgConf, err := root.GetKey("WGConfig")
 	wgCfg := cfg
 	if err == nil {
-		wgCfg, err = ini.LoadSources(iniOpt, wgConf.String())
+		wgPath := wgConf.String()
+		// A bare filename (no path separators) is resolved relative to the
+		// directory of the parent config file, so the wg config can sit
+		// alongside the wireproxy config without needing a full path.
+		if filepath.Base(wgPath) == wgPath {
+			wgPath = filepath.Join(filepath.Dir(path), wgPath)
+		}
+		wgCfg, err = ini.LoadSources(iniOpt, wgPath)
 		if err != nil {
 			return nil, err
 		}
@@ -566,11 +624,6 @@ func ParseConfig(path string) (*Configuration, error) {
 		return nil, err
 	}
 
-	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPClientTunnel", parseUDPClientTunnelConfig)
-	if err != nil {
-		return nil, err
-	}
-
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "TCPServerTunnel", parseTCPServerTunnelConfig)
 	if err != nil {
 		return nil, err
@@ -586,6 +639,23 @@ func ParseConfig(path string) (*Configuration, error) {
 		return nil, err
 	}
 
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "SNI", parseSNIConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if resolveSection, err := cfg.GetSection("Resolve"); err == nil {
+		resolve, err = parseResolveConfig(resolveSection)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPProxyTunnel", parseUDPProxyTunnelConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "Socks5Tunnel", parseSocks5TunnelConfig)
 	if err != nil {
 		return nil, err
@@ -594,5 +664,6 @@ func ParseConfig(path string) (*Configuration, error) {
 	return &Configuration{
 		Device:   device,
 		Routines: routinesSpawners,
+		Resolve:  resolve,
 	}, nil
 }

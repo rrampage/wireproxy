@@ -25,27 +25,27 @@ type DeviceSetting struct {
 func CreateIPCRequest(conf *DeviceConfig) (*DeviceSetting, error) {
 	var request bytes.Buffer
 
-	request.WriteString(fmt.Sprintf("private_key=%s\n", conf.SecretKey))
+	fmt.Fprintf(&request, "private_key=%s\n", conf.SecretKey)
 
 	if conf.ListenPort != nil {
-		request.WriteString(fmt.Sprintf("listen_port=%d\n", *conf.ListenPort))
+		fmt.Fprintf(&request, "listen_port=%d\n", *conf.ListenPort)
 	}
 
 	for _, peer := range conf.Peers {
-		request.WriteString(fmt.Sprintf(heredoc.Doc(`
+		fmt.Fprintf(&request, heredoc.Doc(`
 				public_key=%s
 				persistent_keepalive_interval=%d
 				preshared_key=%s
 			`),
 			peer.PublicKey, peer.KeepAlive, peer.PreSharedKey,
-		))
+		)
 		if peer.Endpoint != nil {
-			request.WriteString(fmt.Sprintf("endpoint=%s\n", *peer.Endpoint))
+			fmt.Fprintf(&request, "endpoint=%s\n", *peer.Endpoint)
 		}
 
 		if len(peer.AllowedIPs) > 0 {
 			for _, ip := range peer.AllowedIPs {
-				request.WriteString(fmt.Sprintf("allowed_ip=%s\n", ip.String()))
+				fmt.Fprintf(&request, "allowed_ip=%s\n", ip.String())
 			}
 		} else {
 			request.WriteString(heredoc.Doc(`
@@ -60,8 +60,9 @@ func CreateIPCRequest(conf *DeviceConfig) (*DeviceSetting, error) {
 }
 
 // StartWireguard creates a tun interface on netstack given a configuration
-func StartWireguard(conf *DeviceConfig, logLevel int) (*VirtualTun, error) {
-	setting, err := CreateIPCRequest(conf)
+func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
+	deviceConf := conf.Device
+	setting, err := CreateIPCRequest(deviceConf)
 	if err != nil {
 		return nil, err
 	}
@@ -81,10 +82,29 @@ func StartWireguard(conf *DeviceConfig, logLevel int) (*VirtualTun, error) {
 		return nil, err
 	}
 
+	hasV4 := false
+	hasV6 := false
+	for _, addr := range setting.DeviceAddr {
+		if addr.Is4() {
+			hasV4 = true
+		}
+		if addr.Is6() {
+			hasV6 = true
+		}
+	}
+
+	if conf.Resolve.ResolveStrategy == "auto" {
+		if hasV4 && !hasV6 {
+			conf.Resolve.ResolveStrategy = "ipv4"
+		} else {
+			conf.Resolve.ResolveStrategy = "ipv6"
+		}
+	}
 	return &VirtualTun{
 		Tnet:           tnet,
 		Dev:            dev,
-		Conf:           conf,
+		Conf:           deviceConf,
+		ResolveConfig:  conf.Resolve,
 		SystemDNS:      len(setting.DNS) == 0,
 		PingRecord:     make(map[string]uint64),
 		PingRecordLock: new(sync.Mutex),

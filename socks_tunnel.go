@@ -134,7 +134,7 @@ func makeChainedConnectHandler(vt *VirtualTun, upstream *UpstreamSocksConfig) fu
 			socks5.SendReply(writer, statute.RepHostUnreachable, nil)
 			return fmt.Errorf("failed to connect to upstream: %w", err)
 		}
-		defer upstreamConn.Close()
+		defer func() { _ = upstreamConn.Close() }()
 
 		// Perform SOCKS5 handshake with upstream
 		if err := upstreamHandshake(upstreamConn, upstream); err != nil {
@@ -179,7 +179,7 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
 			return fmt.Errorf("failed to connect to upstream: %w", err)
 		}
-		defer upstreamCtrl.Close()
+		defer func() { _ = upstreamCtrl.Close() }()
 
 		// Perform SOCKS5 handshake with upstream
 		if err := upstreamHandshake(upstreamCtrl, upstream); err != nil {
@@ -201,7 +201,7 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
 			return fmt.Errorf("failed to connect to upstream UDP relay: %w", err)
 		}
-		defer upstreamUDP.Close()
+		defer func() { _ = upstreamUDP.Close() }()
 
 		// Create local UDP listener for client
 		localUDPAddr := &net.UDPAddr{IP: bindIP, Port: 0}
@@ -210,7 +210,7 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
 			return fmt.Errorf("failed to create local UDP listener: %w", err)
 		}
-		defer localUDP.Close()
+		defer func() { _ = localUDP.Close() }()
 
 		// Tell client our local UDP address
 		if err := socks5.SendReply(writer, statute.RepSuccess, localUDP.LocalAddr()); err != nil {

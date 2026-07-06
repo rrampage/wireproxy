@@ -26,17 +26,11 @@ anything.
 Users who want something similar but for Amnezia VPN can use [this fork](https://github.com/artem-russkikh/wireproxy-awg)
 of wireproxy by [@artem-russkikh](https://github.com/artem-russkikh).
 
-# Sponsor
-
-This project is supported by [IPRoyal](https://iproyal.com/?r=795836). You can get premium quality proxies at unbeatable prices
-with a discount using [this referral link](https://iproyal.com/?r=795836)! 🚀
-
-![IPRoyal](/assets/iproyal.png)
-
 # Feature
 
 - TCP static routing for client and server
 - SOCKS5/HTTP proxy (currently only CONNECT is supported)
+- Transparent TLS ([SNI](https://en.wikipedia.org/wiki/Server_Name_Indication)) proxy
 
 # TODO
 
@@ -114,15 +108,16 @@ Endpoint = my.ddns.example.com:51820
 BindAddress = 127.0.0.1:25565
 Target = play.cubecraft.net:25565
 
-# UDPClientTunnel is a tunnel listening on your machine,
+# UDPProxyTunnel is a tunnel listening on your machine,
 # and it forwards any UDP traffic received to the specified target via wireguard.
 # This is useful for accessing UDP services (e.g. DNS) on a wireguard peer.
 # Flow:
 # <an app on your LAN> --> localhost:5353 --(wireguard)--> 10.0.0.1:53
 # e.g `dig @localhost -p 5353 example.com`
-[UDPClientTunnel]
+[UDPProxyTunnel]
 BindAddress = 127.0.0.1:5353
 Target = 10.0.0.1:53
+InactivityTimeout = 30 # If its set to 0, it will never timeout
 
 # TCPServerTunnel is a tunnel listening on wireguard,
 # and it forwards any TCP traffic received to the specified target via local network.
@@ -162,6 +157,15 @@ BindAddress = 127.0.0.1:25345
 # Avoid using spaces in the password field
 #Password = ...
 
+# Specifying certificate and key enables HTTPS
+#CertFile = ...
+#KeyFile = ...
+
+# SNI creates a transparent TLS proxy on your LAN, and all traffic would be routed via wireguard,
+# using Server Name Indication as routing destination.
+[SNI]
+BindAddress = 0.0.0.0:443
+
 # Socks5Tunnel creates a SOCKS5 proxy that chains through an upstream SOCKS5 server
 # accessible via wireguard. This is useful for accessing a SOCKS5 proxy on a peer.
 # Flow:
@@ -191,6 +195,18 @@ WGConfig = <path to the wireguard config>
 
 [Socks5]
 ...
+
+[UDPProxyTunnel]
+BindAddress = 127.0.0.1:53
+Target = 1.1.1.1:53
+InactivityTimeout = 30 # If its set to 0, it will never timeout
+
+[Resolve]
+# Set DNS resolve strategy.
+# `ipv4`: Prioritize A records.
+# `ipv6`: Prioritize AAAA records.
+# `auto` (Default): If the WireGuard interface has an IPv4 address only, it is equivalent to `ipv4`; otherwise it is equivalent to `ipv6`.
+ResolveStrategy = auto
 ```
 
 Having multiple peers is also supported. `AllowedIPs` would need to be specified
