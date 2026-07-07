@@ -166,19 +166,16 @@ func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
 		authMethods = append(authMethods, socks5.NoAuthAuthenticator{})
 	}
 
-	// Extract bind IP for UDP associate - this ensures UDP listener binds to same interface
-	bindHost, _, err := net.SplitHostPort(config.BindAddress)
-	if err != nil {
-		log.Fatalf("Invalid SOCKS5 bind address %s: %v", config.BindAddress, err)
-	}
-	bindIP := net.ParseIP(bindHost)
-
+	// Since go-socks5 v0.1.0 the UDP associate relay binds to the IP the
+	// control connection arrived on; WithBindIP is only honored together with
+	// UseBindIpBaseResolveAsUdpAddr and would pin the relay to a single
+	// (possibly wildcard) IP, so it is intentionally not set.
 	options := []socks5.Option{
 		socks5.WithDial(vt.Tnet.DialContext),
 		socks5.WithResolver(vt),
 		socks5.WithAuthMethods(authMethods),
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
-		socks5.WithBindIP(bindIP),
+		socks5.WithLogger(socks5.NewLogger(errorLogger)),
 	}
 
 	server := socks5.NewServer(options...)

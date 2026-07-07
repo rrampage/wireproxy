@@ -7,10 +7,12 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/bufferpool"
@@ -108,8 +110,8 @@ func (config *Socks5TunnelConfig) SpawnRoutine(vt *VirtualTun) {
 	options := []socks5.Option{
 		socks5.WithAuthMethods(authMethods),
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
-		socks5.WithBindIP(bindIP),
 		socks5.WithResolver(vt),
+		socks5.WithLogger(socks5.NewLogger(errorLogger)),
 		// Custom handlers for chaining
 		socks5.WithConnectHandle(makeChainedConnectHandler(vt, upstream)),
 		socks5.WithAssociateHandle(makeChainedAssociateHandler(vt, upstream, bindIP)),
@@ -122,6 +124,13 @@ func (config *Socks5TunnelConfig) SpawnRoutine(vt *VirtualTun) {
 		log.Fatal(err)
 	}
 }
+
+// upstreamHandshakeTimeout bounds the blocking reads performed while
+// negotiating with the upstream SOCKS server. vt.Tnet.DialContext already
+// bounds the connect attempt via ctx, but the reads after a successful connect
+// are not covered by ctx, so a wedged upstream that never replies would
+// otherwise block the handler goroutine (and leak its netstack conn) forever.
+const upstreamHandshakeTimeout = 10 * time.Second
 
 // makeChainedConnectHandler creates a TCP CONNECT handler that chains through upstream
 func makeChainedConnectHandler(vt *VirtualTun, upstream *UpstreamSocksConfig) func(ctx context.Context, writer io.Writer, request *socks5.Request) error {
@@ -136,6 +145,10 @@ func makeChainedConnectHandler(vt *VirtualTun, upstream *UpstreamSocksConfig) fu
 		}
 		defer func() { _ = upstreamConn.Close() }()
 
+		// Bound the handshake reads; ctx only covers the dial, not the reads
+		// that follow a successful connect.
+		_ = upstreamConn.SetDeadline(time.Now().Add(upstreamHandshakeTimeout))
+
 		// Perform SOCKS5 handshake with upstream
 		if err := upstreamHandshake(upstreamConn, upstream); err != nil {
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
@@ -148,23 +161,36 @@ func makeChainedConnectHandler(vt *VirtualTun, upstream *UpstreamSocksConfig) fu
 			return fmt.Errorf("upstream connect failed: %w", err)
 		}
 
+		// Handshake done; drop the deadline before the unbounded proxy copy.
+		_ = upstreamConn.SetDeadline(time.Time{})
+
 		// Success - tell client we're connected
 		if err := socks5.SendReply(writer, statute.RepSuccess, upstreamConn.LocalAddr()); err != nil {
 			return fmt.Errorf("failed to send reply: %w", err)
 		}
 
-		// Proxy data bidirectionally
+		// Proxy data bidirectionally. Propagate half-close so a client that
+		// finishes its request and shuts down its send side signals EOF to the
+		// upstream instead of tearing the connection down, and wait for BOTH
+		// directions before the deferred Close runs so the upstream's response
+		// is not truncated mid-flight.
 		errCh := make(chan error, 2)
 		go func() {
 			_, err := io.Copy(upstreamConn, request.Reader)
+			if cw, ok := upstreamConn.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
 			errCh <- err
 		}()
 		go func() {
 			_, err := io.Copy(writer, upstreamConn)
+			if cw, ok := writer.(interface{ CloseWrite() error }); ok {
+				_ = cw.CloseWrite()
+			}
 			errCh <- err
 		}()
 
-		// Wait for either direction to finish
+		<-errCh
 		<-errCh
 		return nil
 	}
@@ -181,6 +207,10 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 		}
 		defer func() { _ = upstreamCtrl.Close() }()
 
+		// Bound the handshake reads; ctx only covers the dial, not the reads
+		// that follow a successful connect.
+		_ = upstreamCtrl.SetDeadline(time.Now().Add(upstreamHandshakeTimeout))
+
 		// Perform SOCKS5 handshake with upstream
 		if err := upstreamHandshake(upstreamCtrl, upstream); err != nil {
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
@@ -194,8 +224,13 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 			return fmt.Errorf("upstream UDP associate failed: %w", err)
 		}
 
+		// Association established; the control connection now lives for the
+		// association's lifetime (watched below), so drop the handshake
+		// deadline before the long-lived read.
+		_ = upstreamCtrl.SetDeadline(time.Time{})
+
 		// Connect to upstream's UDP relay via WireGuard
-		upstreamRelayAddr := fmt.Sprintf("%s:%d", relayHost, relayPort)
+		upstreamRelayAddr := net.JoinHostPort(relayHost, strconv.Itoa(relayPort))
 		upstreamUDP, err := vt.Tnet.DialContext(ctx, "udp", upstreamRelayAddr)
 		if err != nil {
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
@@ -203,9 +238,14 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 		}
 		defer func() { _ = upstreamUDP.Close() }()
 
-		// Create local UDP listener for client
-		localUDPAddr := &net.UDPAddr{IP: bindIP, Port: 0}
-		localUDP, err := net.ListenUDP("udp", localUDPAddr)
+		// Create local UDP listener for the client, bound to the IP the
+		// control connection arrived on so the BND.ADDR reply is usable even
+		// when BindAddress is a wildcard or hostname
+		relayIP := bindIP
+		if tcpAddr, ok := request.LocalAddr.(*net.TCPAddr); ok {
+			relayIP = tcpAddr.IP
+		}
+		localUDP, err := net.ListenUDP("udp", &net.UDPAddr{IP: relayIP, Port: 0})
 		if err != nil {
 			socks5.SendReply(writer, statute.RepServerFailure, nil)
 			return fmt.Errorf("failed to create local UDP listener: %w", err)
@@ -217,17 +257,34 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 			return fmt.Errorf("failed to send reply: %w", err)
 		}
 
+		// Only accept datagrams from the IP that opened the association, so
+		// another host cannot inject packets or hijack the reply path
+		var expectedClient netip.Addr
+		if tcpAddr, ok := request.RemoteAddr.(*net.TCPAddr); ok {
+			expectedClient = tcpAddr.AddrPort().Addr().Unmap()
+		}
+
 		// Track client address for sending responses
-		var clientAddr *net.UDPAddr
+		var clientAddr netip.AddrPort
 		var clientAddrMu sync.RWMutex
 
 		// Relay: client -> upstream
 		go func() {
 			buf := make([]byte, 65535)
 			for {
-				n, addr, err := localUDP.ReadFromUDP(buf)
+				n, addr, err := localUDP.ReadFromUDPAddrPort(buf)
 				if err != nil {
 					return
+				}
+				// A SOCKS5 UDP datagram header is at least 10 bytes (2 RSV +
+				// 1 FRAG + 1 ATYP + 4 IPv4 + 2 port). RFC 1928 also requires
+				// dropping fragmented datagrams (FRAG != 0) when reassembly is
+				// unsupported, which it is here and in the upstream relay.
+				if n < 10 || buf[2] != 0x00 {
+					continue
+				}
+				if expectedClient.IsValid() && addr.Addr().Unmap() != expectedClient {
+					continue
 				}
 				clientAddrMu.Lock()
 				clientAddr = addr
@@ -251,20 +308,45 @@ func makeChainedAssociateHandler(vt *VirtualTun, upstream *UpstreamSocksConfig, 
 				addr := clientAddr
 				clientAddrMu.RUnlock()
 
-				if addr != nil {
-					localUDP.WriteTo(buf[:n], addr)
+				if addr.IsValid() {
+					localUDP.WriteToUDPAddrPort(buf[:n], addr)
 				}
 			}
 		}()
 
-		// Keep alive until TCP control connection closes
-		buf := make([]byte, 1)
-		for {
-			_, err := request.Reader.Read(buf)
-			if err != nil {
-				return nil
+		// The association lives until either control connection closes.
+		// RFC 1928 lets either side tear it down: the downstream client by
+		// closing its control connection, or the upstream relay by closing
+		// ours. Watch both; whichever ends first tears everything down via the
+		// deferred closes above, which unblock both relay goroutines.
+		done := make(chan struct{})
+		var once sync.Once
+		finish := func() { once.Do(func() { close(done) }) }
+
+		// Watch the upstream control connection for teardown.
+		go func() {
+			defer finish()
+			buf := make([]byte, 1)
+			for {
+				if _, err := upstreamCtrl.Read(buf); err != nil {
+					return
+				}
 			}
-		}
+		}()
+
+		// Watch the downstream client control connection.
+		go func() {
+			defer finish()
+			buf := make([]byte, 1)
+			for {
+				if _, err := request.Reader.Read(buf); err != nil {
+					return
+				}
+			}
+		}()
+
+		<-done
+		return nil
 	}
 }
 
@@ -424,8 +506,9 @@ func upstreamUDPAssociate(conn net.Conn, config *UpstreamSocksConfig) (string, i
 	}
 	relayPort := int(portBuf[0])<<8 | int(portBuf[1])
 
-	// If relay returns 0.0.0.0, use upstream's IP
-	if relayHost == "0.0.0.0" || relayHost == "127.0.0.1" {
+	// A wildcard or loopback BND.ADDR is not reachable through the tunnel;
+	// use the upstream server's address instead
+	if ip := net.ParseIP(relayHost); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
 		relayHost = config.Host
 	}
 
