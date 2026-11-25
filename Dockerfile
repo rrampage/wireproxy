@@ -1,10 +1,14 @@
-# Start by building the application.
-FROM docker.io/golang:1.26 as build
+# Build on the native builder platform and cross-compile for the target, so
+# multi-platform builds don't need QEMU emulation. The Makefile sets
+# CGO_ENABLED=0, which the static distroless base image below requires.
+FROM --platform=$BUILDPLATFORM docker.io/golang:1.26 AS build
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /usr/src/wireproxy
 COPY . .
 
-RUN make
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH make
 
 # Now copy it into our base image.
 FROM gcr.io/distroless/static-debian13:nonroot

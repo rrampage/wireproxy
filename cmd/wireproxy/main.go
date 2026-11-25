@@ -127,18 +127,6 @@ func panicIfError(err error) {
 	}
 }
 
-// attempts to pledge and panic if it fails
-// this does nothing on non-OpenBSD systems
-func pledgeOrPanic(promises string) {
-	panicIfError(pledge(promises))
-}
-
-// attempts to unveil and panic if it fails
-// this does nothing on non-OpenBSD systems
-func unveilOrPanic(path string, flags string) {
-	panicIfError(unveil(path, flags))
-}
-
 // get the executable path via syscalls or infer it from argv
 func executablePath() string {
 	programPath, err := os.Executable()
@@ -179,26 +167,15 @@ func tlsFilePaths(routines []wireproxy.RoutineSpawner) []string {
 func lock(stage string, roFilles ...string) {
 	switch stage {
 	case "boot":
-		exePath := executablePath()
-		// OpenBSD
-		unveilOrPanic("/", "r")
-		unveilOrPanic(exePath, "x")
-		// only allow standard stdio operation, file reading, networking, and exec
-		// also remove unveil permission to lock unveil
-		pledgeOrPanic("stdio rpath inet dns proc exec")
-		// Linux
+		// Linux: read-only filesystem access from here on
 		panicIfError(landlock.V1.BestEffort().RestrictPaths(
 			landlock.RODirs("/"),
 			landlock.RWFiles("/dev/null").IgnoreIfMissing(),
 		))
-	case "boot-daemon":
-	case "read-config":
-		// OpenBSD
-		pledgeOrPanic("stdio rpath inet dns")
+	case "boot-daemon", "read-config":
+		// nothing further to restrict at these stages
 	case "ready":
 		// no file access is allowed from now on, only networking
-		// OpenBSD
-		pledgeOrPanic("stdio inet dns")
 		// Linux
 		net.DefaultResolver.PreferGo = true // needed to lock down dependencies
 

@@ -12,153 +12,45 @@ on:
 permissions: {}
 
 jobs:
-  windowsAmd64Build:
-    name: Build Windows amd64 Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  cross-compile:
+    name: Cross-compile check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+
     permissions:
       contents: read
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Setting up Go
+
+      - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - name: Building Windows amd64 Version
+          cache: true
+
+      # Compile-only check (no artifacts) for every release target. Keep the
+      # list in sync with the targets in wireproxy.yml.
+      - name: Cross-compile
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
         run: |
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o WireProxy_amd64.exe -v ./cmd/wireproxy
-          mkdir release_windows_amd64
-          mv WireProxy_amd64.exe wireproxy.exe
-          cp wireproxy.exe release_windows_amd64/wireproxy.exe
-      - name: Upload Windows amd64 Version
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: WireProxy_windows_amd64
-          path: release_windows_amd64
-  windowsArm64Build:
-    name: Build Windows arm64 Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setting up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Building Windows arm64 Version
-        run: |
-          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -o WireProxy_arm64.exe -v ./cmd/wireproxy
-          mkdir release_windows_arm64
-          mv WireProxy_arm64.exe wireproxy.exe
-          cp wireproxy.exe release_windows_arm64/wireproxy.exe
-      - name: Upload Windows arm64 Version
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: WireProxy_windows_arm64
-          path: release_windows_arm64
-  linuxAmd64Build:
-    name: Build Linux amd64 Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setting up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Building Linux amd64 Version
-        run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o WireProxy_amd64 -v ./cmd/wireproxy
-          mkdir release_linux_amd64
-          mv WireProxy_amd64 wireproxy
-          cp wireproxy release_linux_amd64/wireproxy
-      - name: Upload Linux amd64 Version
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: WireProxy_linux_amd64
-          path: release_linux_amd64
-  linuxArm64Build:
-    name: Build Linux arm64 Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setting up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Building Linux arm64 Version
-        run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o WireProxy_arm64 -v ./cmd/wireproxy
-          mkdir release_linux_arm64
-          mv WireProxy_arm64 wireproxy
-          cp wireproxy release_linux_arm64/wireproxy
-      - name: Upload Linux arm64 Version
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: WireProxy_linux_arm64
-          path: release_linux_arm64
-  darwinAmd64Build:
-    name: Build Darwin amd64 Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setting up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Building Darwin amd64 Version
-        run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o WireProxy_amd64 -v ./cmd/wireproxy
-          mkdir release_darwin_amd64
-          mv WireProxy_amd64 wireproxy
-          cp wireproxy release_darwin_amd64/wireproxy
-      - name: Upload Darwin amd64 Version
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: WireProxy_darwin_amd64
-          path: release_darwin_amd64
-  darwinArm64Build:
-    name: Build Darwin arm64 Version
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Setting up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Building Darwin arm64 Version
-        run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o WireProxy_arm64 -v ./cmd/wireproxy
-          mkdir release_darwin_arm64
-          mv WireProxy_arm64 wireproxy
-          cp wireproxy release_darwin_arm64/wireproxy
-      - name: Upload Darwin arm64 Version
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: WireProxy_darwin_arm64
-          path: release_darwin_arm64
+          set -euo pipefail
+
+          targets=(
+            linux/amd64
+            linux/arm64
+            linux/riscv64
+            darwin/amd64
+            darwin/arm64
+            windows/amd64
+          )
+
+          for target in "${targets[@]}"; do
+            echo "== $target"
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./...
+          done
