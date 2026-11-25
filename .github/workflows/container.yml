@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - master
+    tags:
+      - "v*"
 
-  # Allow for manually running
+  # Allow for manually running (builds but does not push)
   workflow_dispatch:
     inputs:
       container_tag:
@@ -18,51 +20,85 @@ permissions: {}
 jobs:
   container:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     permissions:
       contents: read
+      # Push the image to ghcr.io/<owner>/<repo>
       packages: write
 
     env:
       CONTAINER_NAME: ghcr.io/${{ github.repository }}
-      BUILD_PLATFORMS: linux/amd64,linux/arm64
+      LOCAL_MANIFEST: localhost/wireproxy:build
       RAW_CONTAINER_TAG: ${{ github.event.inputs.container_tag || 'latest' }}
 
     steps:
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
-      - name: Set up Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: Build container
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        shell: bash
         run: |
-          CONTAINER_TAG="${RAW_CONTAINER_TAG//[^a-zA-Z0-9]/-}"
-          REPO_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          set -euo pipefail
 
-          PUSH_FLAG=()
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            PUSH_FLAG=(--push)
+          # Same rules as the release workflow: exact vX.Y.Z on a master commit.
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $GITHUB_REF_NAME" >&2
+            exit 1
           fi
 
-          docker buildx build \
-            --platform "$BUILD_PLATFORMS" \
-            --tag "$CONTAINER_NAME:$CONTAINER_TAG" \
-            --tag "$CONTAINER_NAME:$GITHUB_SHA" \
+          git fetch --no-tags origin master
+
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "Release tag does not point to a commit on master" >&2
+            exit 1
+          fi
+
+      - name: Build binaries
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          # Release tags use the same version string as the release archives.
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(git describe --always --tags --match 'v*')"
+          fi
+
+          rm -rf dist
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" \
+              go build \
+                -trimpath \
+                -ldflags "-s -w -X main.version=$VERSION" \
+                -o "dist/linux_${arch}/wireproxy" \
+                ./cmd/wireproxy
+          done
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPO_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          podman build \
+            --platform linux/amd64,linux/arm64 \
+            --manifest "$LOCAL_MANIFEST" \
+            --file .github/container/Dockerfile \
             --label "org.opencontainers.image.source=$REPO_URL" \
             --label "org.opencontainers.image.documentation=$REPO_URL" \
             --label "org.opencontainers.image.url=$REPO_URL/packages" \
@@ -70,4 +106,32 @@ jobs:
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.vendor=$GITHUB_REPOSITORY_OWNER" \
             --label "org.opencontainers.image.created=$(date -u --rfc-3339=seconds)" \
-            --pull "${PUSH_FLAG[@]}" .
+            dist
+
+          podman manifest inspect "$LOCAL_MANIFEST"
+
+      - name: Push image
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Release tags publish the version (v1.2.3 -> 1.2.3); master pushes
+          # publish "latest".
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            CONTAINER_TAG="${GITHUB_REF_NAME#v}"
+          else
+            CONTAINER_TAG="${RAW_CONTAINER_TAG//[^a-zA-Z0-9]/-}"
+          fi
+
+          printf '%s' "$GITHUB_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+          for tag in "$CONTAINER_TAG" "$GITHUB_SHA"; do
+            podman manifest push --all "$LOCAL_MANIFEST" "docker://$CONTAINER_NAME:$tag"
+          done
+
+      - name: Log out of registry
+        if: always() && github.event_name == 'push'
+        run: podman logout ghcr.io || true

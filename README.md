@@ -1,8 +1,8 @@
 # wireproxy
 
 [![ISC licensed](https://img.shields.io/badge/license-ISC-blue)](./LICENSE)
-[![Build status](https://github.com/octeep/wireproxy/actions/workflows/build.yml/badge.svg)](https://github.com/octeep/wireproxy/actions)
-[![Documentation](https://img.shields.io/badge/godoc-wireproxy-blue)](https://pkg.go.dev/github.com/octeep/wireproxy)
+[![Build status](https://github.com/rrampage/wireproxy/actions/workflows/build.yml/badge.svg)](https://github.com/rrampage/wireproxy/actions)
+[![Documentation](https://img.shields.io/badge/godoc-wireproxy-blue)](https://pkg.go.dev/github.com/rrampage/wireproxy)
 
 A wireguard client that exposes itself as a socks5/http proxy or tunnels.
 
@@ -61,7 +61,7 @@ Options:
 # Build instruction
 
 ```bash
-git clone https://github.com/octeep/wireproxy
+git clone https://github.com/rrampage/wireproxy
 cd wireproxy
 make
 ```
@@ -317,7 +317,3 @@ CheckAlive = 1.1.1.1
 If nothing is set for `CheckAlive`, an empty JSON object with 200 will be the response.
 
 The peer which the ICMP ping packet is routed to depends on the `AllowedIPs` set for each peers.
-
-# Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/octeep/wireproxy.svg)](https://starchart.cc/octeep/wireproxy)
