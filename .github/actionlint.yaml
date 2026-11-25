@@ -1,0 +1,6 @@
+# actionlint (as of v1.7.12) doesn't know the GitHub-hosted ubuntu-26.04
+# runner yet. Declaring it here only silences that check; remove once
+# actionlint lists it natively.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
